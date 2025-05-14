@@ -1,0 +1,750 @@
+diff --git a/Makefile b/Makefile
+index 419ce66..9f40871 100644
+--- a/Makefile
++++ b/Makefile
+@@ -72,6 +72,7 @@ export include_dir=$(CURDIR)/include
+ export libsbi_dir=$(CURDIR)/lib/sbi
+ export libsbiutils_dir=$(CURDIR)/lib/utils
+ export firmware_dir=$(CURDIR)/firmware
++export libsbikasan_dir=$(CURDIR)/lib/kasan
+ 
+ # Setup variables for kconfig
+ ifdef PLATFORM
+@@ -222,6 +223,7 @@ endif
+ libsbi-object-mks=$(shell if [ -d $(libsbi_dir) ]; then find $(libsbi_dir) -iname "objects.mk" | sort -r; fi)
+ libsbiutils-object-mks=$(shell if [ -d $(libsbiutils_dir) ]; then find $(libsbiutils_dir) -iname "objects.mk" | sort -r; fi)
+ firmware-object-mks=$(shell if [ -d $(firmware_dir) ]; then find $(firmware_dir) -iname "objects.mk" | sort -r; fi)
++libsbikasan-object-mks=$(shell if [ -d $(libsbikasan_dir) ]; then find $(libsbikasan_dir) -iname "objects.mk" | sort -r; fi)
+ 
+ # The "make all" rule should always be first rule
+ .PHONY: all
+@@ -264,6 +266,7 @@ include $(platform-object-mks)
+ endif
+ include $(libsbi-object-mks)
+ include $(libsbiutils-object-mks)
++include $(libsbikasan-object-mks)
+ include $(firmware-object-mks)
+ 
+ # Setup list of objects
+@@ -272,6 +275,7 @@ ifdef PLATFORM
+ libsbiutils-objs-path-y=$(foreach obj,$(libsbiutils-objs-y),$(platform_build_dir)/lib/utils/$(obj))
+ platform-objs-path-y=$(foreach obj,$(platform-objs-y),$(platform_build_dir)/$(obj))
+ firmware-bins-path-y=$(foreach bin,$(firmware-bins-y),$(platform_build_dir)/firmware/$(bin))
++libsbikasan-objs-path-y=$(foreach obj,$(libsbikasan-objs-y),$(build_dir)/lib/kasan/$(obj))
+ endif
+ firmware-elfs-path-y=$(firmware-bins-path-y:.bin=.elf)
+ firmware-objs-path-y=$(firmware-bins-path-y:.bin=.o)
+@@ -282,6 +286,7 @@ deps-y+=$(libsbi-objs-path-y:.o=.dep)
+ deps-y+=$(libsbiutils-objs-path-y:.o=.dep)
+ deps-y+=$(firmware-objs-path-y:.o=.dep)
+ deps-y+=$(firmware-elfs-path-y:=.dep)
++deps-y+=$(libsbikasan-objs-path-y:.o=.dep)
+ 
+ # Setup platform ABI, ISA and Code Model
+ ifndef PLATFORM_RISCV_ABI
+@@ -432,6 +437,15 @@ else
+ CFLAGS		+=	-O2
+ endif
+ 
++KASAN_CC_FLAGS := -fsanitize=kernel-address -fsanitize=undefined -fno-sanitize-link-runtime
++KASAN_CC_FLAGS += -fno-builtin
++KASAN_CC_FLAGS += -mllvm -asan-mapping-offset=0x77000000
++KASAN_CC_FLAGS += -mllvm -asan-instrumentation-with-call-threshold=0
++KASAN_CC_FLAGS += -mllvm -asan-stack=1
++KASAN_CC_FLAGS += -mllvm -asan-globals=1
++KASAN_CC_FLAGS += -DKASAN_ENABLED
++CFLAGS += $(KASAN_CC_FLAGS)
++
+ # Setup functions for compilation
+ define dynamic_flags
+ -I$(shell dirname $(2)) -D__OBJNAME__=$(subst -,_,$(shell basename $(1) .o))
+@@ -529,7 +543,7 @@ all: $(targets-y)
+ $(build_dir)/lib/libsbi.a: $(libsbi-objs-path-y)
+ 	$(call compile_ar,$@,$^)
+ 
+-$(platform_build_dir)/lib/libplatsbi.a: $(libsbi-objs-path-y) $(libsbiutils-objs-path-y) $(platform-objs-path-y)
++$(platform_build_dir)/lib/libplatsbi.a: $(libsbi-objs-path-y) $(libsbiutils-objs-path-y) $(platform-objs-path-y) $(libsbikasan-objs-path-y)
+ 	$(call compile_ar,$@,$^)
+ 
+ $(build_dir)/%.dep: $(src_dir)/%.carray $(KCONFIG_AUTOHEADER)
+diff --git a/firmware/fw_base.ldS b/firmware/fw_base.ldS
+index a33746a..e12d559 100644
+--- a/firmware/fw_base.ldS
++++ b/firmware/fw_base.ldS
+@@ -25,6 +25,11 @@
+ 		PROVIDE(_text_end = .);
+ 	}
+ 
++	.init_array : {
++		__global_ctors_start = .;
++		*(.init_array*)
++		__global_ctors_end = .;
++	}
+ 	/* End of the code sections */
+ 
+ 	. = ALIGN(0x1000); /* Ensure next section is page aligned */
+diff --git a/firmware/objects.mk b/firmware/objects.mk
+index a90485d..53ff25e 100644
+--- a/firmware/objects.mk
++++ b/firmware/objects.mk
+@@ -42,7 +42,7 @@ ifdef FW_JUMP_FDT_ADDR
+ firmware-genflags-$(FW_JUMP) += -DFW_JUMP_FDT_ADDR=$(FW_JUMP_FDT_ADDR)
+ endif
+ 
+-firmware-bins-$(FW_PAYLOAD) += fw_payload.bin
++# firmware-bins-$(FW_PAYLOAD) += fw_payload.bin
+ ifdef FW_PAYLOAD_PATH
+ FW_PAYLOAD_PATH_FINAL=$(FW_PAYLOAD_PATH)
+ else
+diff --git a/firmware/payloads/objects.mk b/firmware/payloads/objects.mk
+index 21e0185..962ad63 100644
+--- a/firmware/payloads/objects.mk
++++ b/firmware/payloads/objects.mk
+@@ -7,7 +7,7 @@
+ #   Anup Patel <anup.patel@wdc.com>
+ #
+ 
+-firmware-bins-$(FW_PAYLOAD) += payloads/test.bin
++# firmware-bins-$(FW_PAYLOAD) += payloads/test.bin
+ 
+ test-y += test_head.o
+ test-y += test_main.o
+diff --git a/include/kasan/common.h b/include/kasan/common.h
+new file mode 100644
+index 0000000..791428b
+--- /dev/null
++++ b/include/kasan/common.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright 2024 Google LLC
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __KASAN_COMMON_H__
++#define __KASAN_COMMON_H__
++
++#define CALLER_PC ((unsigned long)__builtin_return_address(0))
++
++void *__kasan_memcpy(void *dst, const void *src, unsigned int size,
++                     uintptr_t pc);
++void *__kasan_memset(void *buf, int c, unsigned int size, uintptr_t pc);
++
++#define kasan_memcpy(dst, src, size) __kasan_memcpy(dst, src, size, CALLER_PC)
++#define kasan_memset(buf, c, size) __kasan_memset(buf, c, size, CALLER_PC)
++
++#endif  // __KASAN_COMMON_H__
+\ No newline at end of file
+diff --git a/include/kasan/kasan.h b/include/kasan/kasan.h
+new file mode 100644
+index 0000000..88658ee
+--- /dev/null
++++ b/include/kasan/kasan.h
+@@ -0,0 +1,22 @@
++/*
++ * Copyright 2024 Google LLC
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++void initialize_kasan(void);
++
++void *kasan_malloc_hook(unsigned long size);
++
++void *kasan_zalloc_hook(unsigned long size);
++
++void kasan_free_hook(void *ptr);
++
++void set_halt_on_error(int halt);
+diff --git a/include/kasan/rt_utils.h b/include/kasan/rt_utils.h
+new file mode 100644
+index 0000000..88b42ba
+--- /dev/null
++++ b/include/kasan/rt_utils.h
+@@ -0,0 +1,19 @@
++/*
++ * Copyright 2024 Google LLC
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __RT_UTILS_H__
++#define __RT_UTILS_H__
++
++void call_global_ctors(void);
++
++#endif  // __RT_UTILS_H__
+\ No newline at end of file
+diff --git a/include/sbi/sbi_heap.h b/include/sbi/sbi_heap.h
+index a4b3f0c..1662d20 100644
+--- a/include/sbi/sbi_heap.h
++++ b/include/sbi/sbi_heap.h
+@@ -11,6 +11,7 @@
+ #define __SBI_HEAP_H__
+ 
+ #include <sbi/sbi_types.h>
++#include <kasan/kasan.h>
+ 
+ /* Opaque declaration of heap control struct */
+ struct sbi_heap_control;
+@@ -27,6 +28,11 @@ struct sbi_scratch;
+ void *sbi_malloc_from(struct sbi_heap_control *hpctrl, size_t size);
+ 
+ static inline void *sbi_malloc(size_t size)
++{
++	return kasan_malloc_hook(size);
++}
++
++static inline void *sbi_malloc_real(size_t size)
+ {
+ 	return sbi_malloc_from(&global_hpctrl, size);
+ }
+@@ -44,6 +50,11 @@ static inline void *sbi_aligned_alloc(size_t alignment, size_t size)
+ void *sbi_zalloc_from(struct sbi_heap_control *hpctrl, size_t size);
+ 
+ static inline void *sbi_zalloc(size_t size)
++{
++	return kasan_zalloc_hook(size);
++}
++
++static inline void *sbi_zalloc_real(size_t size)
+ {
+ 	return sbi_zalloc_from(&global_hpctrl, size);
+ }
+@@ -65,7 +76,12 @@ void sbi_free_from(struct sbi_heap_control *hpctrl, void *ptr);
+ 
+ static inline void sbi_free(void *ptr)
+ {
+-	return sbi_free_from(&global_hpctrl, ptr);
++	return kasan_free_hook(ptr);
++}
++
++static inline void sbi_free_real(void *ptr)
++{
++	sbi_free_from(&global_hpctrl, ptr);
+ }
+ 
+ /** Amount (in bytes) of free space in the heap area */
+diff --git a/include/sbi/sbi_string.h b/include/sbi/sbi_string.h
+index b7c2bc2..5afa28c 100644
+--- a/include/sbi/sbi_string.h
++++ b/include/sbi/sbi_string.h
+@@ -11,6 +11,7 @@
+ #define __STRING_H__
+ 
+ #include <sbi/sbi_types.h>
++#include <kasan/common.h>
+ 
+ /*
+   Provides sbi_strcmp for the completeness of supporting string functions.
+@@ -35,8 +36,12 @@ char *sbi_strrchr(const char *s, int c);
+ 
+ void *sbi_memset(void *s, int c, size_t count);
+ 
++void *sbi_memset_real(void *s, int c, size_t count);
++
+ void *sbi_memcpy(void *dest, const void *src, size_t count);
+ 
++void *sbi_memcpy_real(void *dest, const void *src, size_t count);
++
+ void *sbi_memmove(void *dest, const void *src, size_t count);
+ 
+ int sbi_memcmp(const void *s1, const void *s2, size_t count);
+diff --git a/lib/kasan/kasan.c b/lib/kasan/kasan.c
+new file mode 100644
+index 0000000..9abbbe0
+--- /dev/null
++++ b/lib/kasan/kasan.c
+@@ -0,0 +1,372 @@
++/*
++ * Copyright 2024 Google LLC
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++#include <sbi/sbi_console.h>
++#include <sbi/sbi_heap.h>
++#include <sbi/sbi_string.h>
++#include <sbi/sbi_hart.h>
++#include <kasan/common.h>
++
++#define KASAN_SHADOW_SHIFT 3
++#define KASAN_SHADOW_GRANULE_SIZE (1UL << KASAN_SHADOW_SHIFT)
++#define KASAN_SHADOW_MASK (KASAN_SHADOW_GRANULE_SIZE - 1)
++
++#define ASAN_SHADOW_UNPOISONED_MAGIC 0x00
++#define ASAN_SHADOW_RESERVED_MAGIC 0xff
++#define ASAN_SHADOW_GLOBAL_REDZONE_MAGIC 0xf9
++#define ASAN_SHADOW_HEAP_HEAD_REDZONE_MAGIC 0xfa
++#define ASAN_SHADOW_HEAP_TAIL_REDZONE_MAGIC 0xfb
++#define ASAN_SHADOW_HEAP_FREE_MAGIC 0xfd
++
++#define KASAN_HEAP_HEAD_REDZONE_SIZE 0x20
++#define KASAN_HEAP_TAIL_REDZONE_SIZE 0x20
++
++#define KASAN_MEM_TO_SHADOW(addr) \
++  (((addr) >> KASAN_SHADOW_SHIFT) + KASAN_SHADOW_MAPPING_OFFSET)
++#define KASAN_SHADOW_TO_MEM(shadow) \
++  (((shadow) - KASAN_SHADOW_MAPPING_OFFSET) << KASAN_SHADOW_SHIFT)
++
++#define KASAN_SHADOW_MAPPING_OFFSET 0x77000000
++#define KASAN_SHADOW_MEMORY_START 0x87000000
++#define KASAN_SHADOW_MEMORY_SIZE 0x2000000
++#define TARGET_DRAM_START 0x80000000
++#define TARGET_DRAM_END 0x8fffffff
++
++int enable_halt_on_error = 0;
++
++void kasan_bug_report(unsigned long addr, size_t size,
++                      unsigned long buggy_shadow_address, uint8_t is_write,
++                      unsigned long ip);
++
++static inline unsigned long get_poisoned_shadow_address(unsigned long addr,
++                                                        size_t size) {
++  unsigned long addr_shadow_start = KASAN_MEM_TO_SHADOW(addr);
++  unsigned long addr_shadow_end = KASAN_MEM_TO_SHADOW(addr + size - 1) + 1;
++  unsigned long non_zero_shadow_addr = 0;
++
++  for (unsigned long i = 0; i < addr_shadow_end - addr_shadow_start; i++) {
++    if (*(uint8_t *)(addr_shadow_start + i) != 0) {
++      non_zero_shadow_addr = addr_shadow_start + i;
++      break;
++    }
++  }
++
++  if (non_zero_shadow_addr) {
++    unsigned long last_byte = addr + size - 1;
++    uint8_t *last_shadow_byte = (uint8_t *)KASAN_MEM_TO_SHADOW(last_byte);
++
++    // Non-zero bytes in shadow memory may indicate either:
++    //  1) invalid memory access (0xff, 0xfa, ...)
++    //  2) access to a 8-byte region which isn't entirely accessible, i.e. only
++    //     n bytes can be read/written in the 8-byte region, where n < 8
++    //     (in this case shadow byte encodes how much bytes in an 8-byte region
++    //     are accessible).
++    // Thus, if there is a non-zero shadow byte we need to check if it
++    // corresponds to the last byte in the checked region:
++    //   not last - OOB memory access
++    //   last - check if we don't access beyond what's encoded in the shadow
++    //          byte.
++    if (non_zero_shadow_addr != (unsigned long)last_shadow_byte ||
++        ((uint8_t)(last_byte & KASAN_SHADOW_MASK) >= *last_shadow_byte))
++      return non_zero_shadow_addr;
++  }
++
++  return 0;
++}
++
++// Both `address` and `size` must be 8-byte aligned.
++static void poison_shadow(unsigned long address, size_t size, uint8_t value) {
++  unsigned long shadow_start, shadow_end;
++  size_t shadow_length = 0;
++
++  shadow_start = KASAN_MEM_TO_SHADOW(address);
++  shadow_end = KASAN_MEM_TO_SHADOW(address + size - 1) + 1;
++  shadow_length = shadow_end - shadow_start;
++
++  sbi_memset_real((void *)shadow_start, value, shadow_length);
++}
++
++// `address` must be 8-byte aligned
++static void unpoison_shadow(unsigned long address, size_t size) {
++  poison_shadow(address, size & (~KASAN_SHADOW_MASK),
++                ASAN_SHADOW_UNPOISONED_MAGIC);
++
++  if (size & KASAN_SHADOW_MASK) {
++    uint8_t *shadow = (uint8_t *)KASAN_MEM_TO_SHADOW(address + size);
++    *shadow = size & KASAN_SHADOW_MASK;
++  }
++}
++
++static inline int kasan_check_memory(unsigned long addr, size_t size,
++                                     uint8_t write, unsigned long pc) {
++  int buggy_shadow_address;
++  if (size == 0) return 1;
++
++  // there is 256 MB of RAM starting at 0x40000000
++  if (addr < TARGET_DRAM_START || addr > TARGET_DRAM_END) return 1;
++
++  buggy_shadow_address = get_poisoned_shadow_address(addr, size);
++  if (buggy_shadow_address == 0) return 1;
++
++  kasan_bug_report(addr, size, buggy_shadow_address, write, pc);
++  return 0;
++}
++
++// Implement necessary routines for KASan sanitization of globals.
++
++// See struct __asan_global definition at
++// https://github.com/llvm-mirror/compiler-rt/blob/master/lib/asan/asan_interface_internal.h.
++struct kasan_global_info {
++  // Starting address of the variable
++  const void *start;
++  // Variable size
++  size_t size;
++  // 32-bit aligned size of global including the redzone
++  size_t size_with_redzone;
++  // Symbol name
++  const void *name;
++  const void *module_name;
++  unsigned long has_dynamic_init;
++  void *location;
++  unsigned int odr_indicator;
++};
++
++static void asan_register_global(struct kasan_global_info *global) {
++  unpoison_shadow((unsigned long)global->start, global->size);
++
++  size_t aligned_size = (global->size + KASAN_SHADOW_MASK) & ~KASAN_SHADOW_MASK;
++  poison_shadow((unsigned long)global->start + aligned_size,
++                global->size_with_redzone - aligned_size,
++                ASAN_SHADOW_GLOBAL_REDZONE_MAGIC);
++}
++
++void __asan_register_globals(struct kasan_global_info *globals, size_t size) {
++  for (size_t i = 0; i < size; i++) asan_register_global(&globals[i]);
++}
++
++void __asan_unregister_globals(void *globals, size_t size) {}
++
++// Empty placeholder implementation to supress linker error for undefined symbol
++void __asan_handle_no_return(void) {}
++
++// KASan memcpy/memset hooks.
++
++void *__kasan_memcpy(void *dst, const void *src, unsigned int size,
++                     unsigned long pc) {
++  kasan_check_memory((unsigned long)dst, size, /*is_write*/ true, pc);
++  kasan_check_memory((unsigned long)src, size, /*is_write*/ false, pc);
++
++  return sbi_memcpy_real(dst, src, size);
++}
++
++void *__kasan_memset(void *buf, int c, unsigned int size, unsigned long pc) {
++  kasan_check_memory((unsigned long)buf, size, /*is_write*/ true, pc);
++
++  return sbi_memset_real(buf, c, size);
++}
++
++// Implement KASan heap management hooks.
++
++struct KASAN_HEAP_HEADER {
++  unsigned int aligned_size;
++};
++
++void *kasan_malloc_hook(unsigned long size) {
++  struct KASAN_HEAP_HEADER *kasan_heap_hdr = NULL;
++  unsigned int algined_size = (size + KASAN_SHADOW_MASK) & (~KASAN_SHADOW_MASK);
++  unsigned int total_size = algined_size + KASAN_HEAP_HEAD_REDZONE_SIZE +
++                            KASAN_HEAP_TAIL_REDZONE_SIZE;
++
++  void *ptr = sbi_malloc_real(total_size);
++  if (ptr == NULL) return NULL;
++
++  kasan_heap_hdr = (struct KASAN_HEAP_HEADER *)ptr;
++  kasan_heap_hdr->aligned_size = algined_size;
++
++  unpoison_shadow((unsigned long)(ptr + KASAN_HEAP_HEAD_REDZONE_SIZE), size);
++  poison_shadow((unsigned long)ptr, KASAN_HEAP_HEAD_REDZONE_SIZE,
++                ASAN_SHADOW_HEAP_HEAD_REDZONE_MAGIC);
++  poison_shadow(
++      (unsigned long)(ptr + KASAN_HEAP_HEAD_REDZONE_SIZE + algined_size),
++      KASAN_HEAP_TAIL_REDZONE_SIZE, ASAN_SHADOW_HEAP_TAIL_REDZONE_MAGIC);
++
++  return ptr + KASAN_HEAP_HEAD_REDZONE_SIZE;
++}
++
++void *kasan_zalloc_hook(unsigned long size) {
++  struct KASAN_HEAP_HEADER *kasan_heap_hdr = NULL;
++  unsigned int algined_size = (size + KASAN_SHADOW_MASK) & (~KASAN_SHADOW_MASK);
++  unsigned int total_size = algined_size + KASAN_HEAP_HEAD_REDZONE_SIZE +
++                            KASAN_HEAP_TAIL_REDZONE_SIZE;
++
++  void *ptr = sbi_zalloc_real(total_size);
++  if (ptr == NULL) return NULL;
++
++  kasan_heap_hdr = (struct KASAN_HEAP_HEADER *)ptr;
++  kasan_heap_hdr->aligned_size = algined_size;
++
++  unpoison_shadow((unsigned long)(ptr + KASAN_HEAP_HEAD_REDZONE_SIZE), size);
++  poison_shadow((unsigned long)ptr, KASAN_HEAP_HEAD_REDZONE_SIZE,
++                ASAN_SHADOW_HEAP_HEAD_REDZONE_MAGIC);
++  poison_shadow(
++      (unsigned long)(ptr + KASAN_HEAP_HEAD_REDZONE_SIZE + algined_size),
++      KASAN_HEAP_TAIL_REDZONE_SIZE, ASAN_SHADOW_HEAP_TAIL_REDZONE_MAGIC);
++
++  return ptr + KASAN_HEAP_HEAD_REDZONE_SIZE;
++}
++
++void kasan_free_hook(void *ptr) {
++  struct KASAN_HEAP_HEADER *kasan_heap_hdr = NULL;
++  unsigned int aligned_size = 0;
++
++  if (ptr == NULL) return;
++
++  kasan_heap_hdr =
++      (struct KASAN_HEAP_HEADER *)(ptr - KASAN_HEAP_HEAD_REDZONE_SIZE);
++  aligned_size = kasan_heap_hdr->aligned_size;
++
++  // free_chunk(kasan_heap_hdr);
++  sbi_free(kasan_heap_hdr);
++  poison_shadow((unsigned long)ptr, aligned_size, ASAN_SHADOW_HEAP_FREE_MAGIC);
++
++  return;
++}
++
++// Implement KAsan error reporting routines.
++
++static void kasan_print_16_bytes_no_bug(const char *prefix,
++                                        unsigned long address) {
++  sbi_printf("%s0x%lX:", prefix, address);
++  for (int i = 0; i < 16; i++) sbi_printf(" %02X", *(uint8_t *)(address + i));
++  sbi_printf("\n");
++}
++
++static void kasan_print_16_bytes_with_bug(const char *prefix,
++                                          unsigned long address,
++                                          int buggy_offset) {
++  sbi_printf("%s0x%lX:", prefix, address);
++  for (int i = 0; i < buggy_offset; i++)
++    sbi_printf(" %02X", *(uint8_t *)(address + i));
++  sbi_printf("[%02X]", *(uint8_t *)(address + buggy_offset));
++  if (buggy_offset < 15)
++    sbi_printf("%02X", *(uint8_t *)(address + buggy_offset + 1));
++  for (int i = buggy_offset + 2; i < 16; i++)
++    sbi_printf(" %02X", *(uint8_t *)(address + i));
++  sbi_printf("\n");
++}
++
++static void kasan_print_shadow_memory(unsigned long address, int range_before,
++                                      int range_after) {
++  unsigned long shadow_address = KASAN_MEM_TO_SHADOW(address);
++  unsigned long aligned_shadow = shadow_address & 0xfffffff0;
++  int buggy_offset = shadow_address - aligned_shadow;
++
++  sbi_printf("[KASan] Shadow bytes around the buggy address 0x%lX (shadow 0x%lX):\n",
++         address & 0xffffffff, shadow_address & 0xffffffff);
++
++  for (int i = range_before; i > 0; i--) {
++    kasan_print_16_bytes_no_bug("[KASan]   ", aligned_shadow - i * 16);
++  }
++
++  kasan_print_16_bytes_with_bug("[KASan] =>", aligned_shadow, buggy_offset);
++
++  for (int i = 1; i <= range_after; i++) {
++    kasan_print_16_bytes_no_bug("[KASan]   ", aligned_shadow + i * 16);
++  }
++}
++
++void kasan_bug_report(unsigned long addr, unsigned long size,
++                      unsigned long buggy_shadow_address, uint8_t is_write,
++                      unsigned long ip) {
++  unsigned long buggy_address = KASAN_SHADOW_TO_MEM(buggy_shadow_address);
++  sbi_printf("[KASan] ===================================================\n");
++  sbi_printf(
++      "[KASan] ERROR: Invalid memory access: address 0x%lX, size 0x%lX, is_write "
++      "%d, ip 0x%lX\n",
++      addr, size, is_write, ip);
++
++  kasan_print_shadow_memory(buggy_address, 3, 3);
++  if (enable_halt_on_error) {
++    sbi_hart_hang();
++  }
++}
++
++void initialize_kasan(void) {
++  // Mark shadow memory region not accessible by the sanitized code.
++  poison_shadow(KASAN_SHADOW_MEMORY_START, KASAN_SHADOW_MEMORY_SIZE,
++                ASAN_SHADOW_RESERVED_MAGIC);
++}
++
++// Define KASan handlers exposed used by the compiler instrumentation.
++
++void __asan_loadN_noabort(unsigned int addr, unsigned int size) {
++  kasan_check_memory(addr, size, /*is_write*/ false, CALLER_PC);
++}
++
++void __asan_storeN_noabort(unsigned int addr, size_t size) {
++  kasan_check_memory(addr, size, /*is_write*/ true, CALLER_PC);
++}
++
++#define DEFINE_KASAN_LOAD_STORE_ROUTINES(size)                     \
++  void __asan_load##size##_noabort(unsigned long addr) {           \
++    kasan_check_memory(addr, size, /*is_write*/ false, CALLER_PC); \
++  }                                                                \
++  void __asan_store##size##_noabort(unsigned long addr) {          \
++    kasan_check_memory(addr, size, /*is_write*/ true, CALLER_PC);  \
++  }
++
++DEFINE_KASAN_LOAD_STORE_ROUTINES(1)
++DEFINE_KASAN_LOAD_STORE_ROUTINES(2)
++DEFINE_KASAN_LOAD_STORE_ROUTINES(4)
++DEFINE_KASAN_LOAD_STORE_ROUTINES(8)
++DEFINE_KASAN_LOAD_STORE_ROUTINES(16)
++
++// Local variable KASan instrumentation
++#define DEFINE_KASAN_SET_SHADOW_ROUTINE(byte)              \
++  void __asan_set_shadow_##byte(void *addr, size_t size) { \
++    sbi_memset_real(addr, 0x##byte, size);                          \
++  }
++
++DEFINE_KASAN_SET_SHADOW_ROUTINE(00)  // addressable memory
++DEFINE_KASAN_SET_SHADOW_ROUTINE(f1)  // stack left redzone
++DEFINE_KASAN_SET_SHADOW_ROUTINE(f2)  // stack mid redzone
++DEFINE_KASAN_SET_SHADOW_ROUTINE(f3)  // stack right redzone
++
++#define DEFINE_UBSAN_HANDLER(func)                              \
++  void func() {                                                  \
++    sbi_printf("[UBSan] ERROR: Invalid operation: %s\n", #func); \
++    if (enable_halt_on_error) { \
++      sbi_hart_hang();          \
++    }                           \
++  }
++
++DEFINE_UBSAN_HANDLER(__ubsan_handle_add_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_builtin_unreachable)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_divrem_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_function_type_mismatch)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_load_invalid_value)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_mul_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_negate_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_out_of_bounds)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_pointer_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_sub_overflow)
++DEFINE_UBSAN_HANDLER(__ubsan_handle_type_mismatch_v1)
++// DEFINE_UBSAN_HANDLER(__ubsan_handle_shift_out_of_bounds)
++
++void __ubsan_handle_shift_out_of_bounds() {
++   // skip
++}
++
++void set_halt_on_error(int halt) {
++  enable_halt_on_error = halt;
++}
+diff --git a/lib/kasan/objects.mk b/lib/kasan/objects.mk
+new file mode 100644
+index 0000000..9b57fc6
+--- /dev/null
++++ b/lib/kasan/objects.mk
+@@ -0,0 +1,2 @@
++libsbikasan-objs-y += kasan.o
++libsbikasan-objs-y += rt_utils.o
+diff --git a/lib/kasan/rt_utils.c b/lib/kasan/rt_utils.c
+new file mode 100644
+index 0000000..6737f36
+--- /dev/null
++++ b/lib/kasan/rt_utils.c
+@@ -0,0 +1,27 @@
++/*
++ * Copyright 2024 Google LLC
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ */
++
++typedef void (*global_ctor)(void);
++
++// These symbols are defined in the linker script.
++extern char __global_ctors_start;
++extern char __global_ctors_end;
++
++void call_global_ctors(void) {
++  global_ctor *ctor = (global_ctor *)&__global_ctors_start;
++
++  while (ctor != (global_ctor *)&__global_ctors_end) {
++    (*ctor)();
++    ctor++;
++  }
++}
+diff --git a/lib/sbi/sbi_init.c b/lib/sbi/sbi_init.c
+index 58030cf..f12c835 100644
+--- a/lib/sbi/sbi_init.c
++++ b/lib/sbi/sbi_init.c
+@@ -32,6 +32,8 @@
+ #include <sbi/sbi_tlb.h>
+ #include <sbi/sbi_version.h>
+ #include <sbi/sbi_unit_test.h>
++#include <kasan/kasan.h>
++#include <kasan/rt_utils.h>
+ 
+ #define BANNER                                              \
+ 	"   ____                    _____ ____ _____\n"     \
+@@ -220,6 +222,10 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
+ 	unsigned long *count;
+ 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+ 
++	call_global_ctors();
++	initialize_kasan();
++	set_halt_on_error(1);
++
+ 	/* Note: This has to be first thing in coldboot init sequence */
+ 	rc = sbi_scratch_init(scratch);
+ 	if (rc)
+diff --git a/lib/sbi/sbi_string.c b/lib/sbi/sbi_string.c
+index 9ebea69..c514182 100644
+--- a/lib/sbi/sbi_string.c
++++ b/lib/sbi/sbi_string.c
+@@ -109,7 +109,7 @@ char *sbi_strrchr(const char *s, int c)
+ 	else
+ 		return (char *)last;
+ }
+-void *sbi_memset(void *s, int c, size_t count)
++void *sbi_memset_real(void *s, int c, size_t count)
+ {
+ 	char *temp = s;
+ 
+@@ -121,7 +121,7 @@ void *sbi_memset(void *s, int c, size_t count)
+ 	return s;
+ }
+ 
+-void *sbi_memcpy(void *dest, const void *src, size_t count)
++void *sbi_memcpy_real(void *dest, const void *src, size_t count)
+ {
+ 	char *temp1	  = dest;
+ 	const char *temp2 = src;
+@@ -189,3 +189,11 @@ void *sbi_memchr(const void *s, int c, size_t count)
+ 
+ 	return NULL;
+ }
++
++void *sbi_memset(void *s, int c, size_t count) {
++	return kasan_memset(s, c, count);
++}
++
++void *sbi_memcpy(void *dest, const void *src, size_t count) {
++	return kasan_memcpy(dest, src, count);
++}

@@ -1,0 +1,25 @@
+[package]
+name = "fuzzer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../common" }
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11.6"
+libafl = "0.15.1"
+libafl_bolts = "0.15.1"
+libafl_qemu = { version = "0.15.1", features = [
+    "riscv64",
+    "systemmode",
+], default-features = false }
+libafl_targets = "0.15.1"
+rangemap = "1.5.1"
+serde = "1.0.218"
+toml = "0.8.20"
+walkdir = "2.5.0"
+chrono = "0.4.40"
+csv = "1.3.1"
+
+[build-dependencies]
+libafl_qemu_build = "0.15.1"

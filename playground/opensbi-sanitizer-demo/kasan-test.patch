@@ -1,0 +1,49 @@
+diff --git a/lib/sbi/sbi_ecall_dbcn.c b/lib/sbi/sbi_ecall_dbcn.c
+index 1b0aebd..dfcba3a 100644
+--- a/lib/sbi/sbi_ecall_dbcn.c
++++ b/lib/sbi/sbi_ecall_dbcn.c
+@@ -15,6 +15,31 @@
+ #include <sbi/sbi_trap.h>
+ #include <sbi/riscv_asm.h>
+ #include <sbi/sbi_hart.h>
++#include <sbi/sbi_heap.h>
++#include <sbi/sbi_string.h>
++
++/* test functions begin */
++#define SBI_TEST_HEAP_OVERFLOW 0x10
++#define SBI_TEST_INTEGER_OVERFLOW 0x11
++
++char oob_value;
++
++void test_heap_overflow(void) {
++    unsigned char *ptr = sbi_malloc(17);
++    sbi_printf("test_heap_overflow: heap buffer at 0x%p\n", ptr);
++    ptr[18] = 0;
++}
++
++void test_integer_overflow(void) {
++    int a = 2147483647;  // INT_MAX (2^31 - 1)
++	int b = 1;
++	int result;
++
++	sbi_printf("test_integer_overflow: adding %d to %d\n", a, b);
++	result = a + b;
++	sbi_printf("Result: %d\n", result);
++}
++/* test functions end */
+ 
+ static int sbi_ecall_dbcn_handler(unsigned long extid, unsigned long funcid,
+ 				  struct sbi_trap_regs *regs,
+@@ -24,6 +49,12 @@ static int sbi_ecall_dbcn_handler(unsigned long extid, unsigned long funcid,
+ 			MSTATUS_MPP_SHIFT;
+ 
+ 	switch (funcid) {
++	case SBI_TEST_HEAP_OVERFLOW: // 0x10
++		test_heap_overflow();
++		return 0;
++	case SBI_TEST_INTEGER_OVERFLOW: // 0x11
++		test_integer_overflow();
++		return 0;
+ 	case SBI_EXT_DBCN_CONSOLE_WRITE:
+ 	case SBI_EXT_DBCN_CONSOLE_READ:
+ 		/*

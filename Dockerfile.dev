@@ -1,0 +1,45 @@
+# devcontainer for sbifuzz
+FROM rustlang/rust:nightly
+
+RUN rustup default nightly
+RUN rustup component add --toolchain nightly rustfmt clippy llvm-tools-preview
+
+RUN apt update 
+RUN apt install -y build-essential gdb git wget gnupg cmake 
+RUN apt install -y gcc-riscv64-linux-gnu gcc-riscv64-unknown-elf
+RUN apt install -y ninja-build lsb-release software-properties-common 
+RUN apt install -y curl zsh vim tzdata htop psmisc qemu-system-riscv64
+
+ENV LLVM_VERSION=19
+RUN curl -sSL https://apt.llvm.org/llvm.sh | bash -s -- ${LLVM_VERSION}
+RUN bash -c 'for f in /usr/bin/llvm* /usr/bin/clang* \
+             /usr/bin/llc-${LLVM_VERSION} \
+             /usr/bin/opt-${LLVM_VERSION} \
+             /usr/bin/lld-${LLVM_VERSION}; do \
+        link=${f::-3}; \
+        echo "linking $f to $link"; \
+        ln -s "$f" "$link"; \
+        if [ -e "$f" ]; then \
+            cp "$link" /usr/local/bin/; \
+        fi; \
+    done'
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+RUN sh -c "$(curl -fsSL https://install.ohmyz.sh)" "" --unattended
+RUN git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+RUN git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+RUN sed  -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/g' ~/.zshrc
+RUN chsh -s $(which zsh)
+
+RUN apt-get install -y apt-transport-https ca-certificates curl gnupg2 lsb-release \
+    && curl -fsSL https://download.docker.com/linux/$(lsb_release -is | tr '[:upper:]' '[:lower:]')/gpg | apt-key add - 2>/dev/null \
+    && echo "deb [arch=amd64] https://download.docker.com/linux/$(lsb_release -is | tr '[:upper:]' '[:lower:]') $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli
+
+RUN apt-get install -y python3-venv gdb-multiarch
+
+ENTRYPOINT [ "/bin/zsh", "-c" ]
+CMD ["/bin/zsh"]

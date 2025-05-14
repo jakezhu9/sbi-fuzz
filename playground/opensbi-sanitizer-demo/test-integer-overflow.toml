@@ -1,0 +1,13 @@
+[metadata]
+extension_name = "console"
+source = "TEST_INTEGER_OVERFLOW"
+
+[args]
+eid = 0x4442434E
+fid = 0x11
+arg0 = 0x0
+arg1 = 0x0
+arg2 = 0x0
+arg3 = 0x0
+arg4 = 0x0
+arg5 = 0x0
